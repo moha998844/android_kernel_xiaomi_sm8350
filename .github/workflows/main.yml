@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_NAME: Bankai
+  DEVICE: vili
+  DEFCONFIG: vili_defconfig
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential cpio curl flex git \
+            kmod libelf-dev libssl-dev lld llvm zip unzip \
+            python3 python-is-python3 rsync wget ca-certificates \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: Install Clang 20
+        run: |
+          set -e
+          mkdir -p "$HOME/clang20"
+          cd "$HOME/clang20"
+          wget -qO- https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.0/clang+llvm-20.1.0-x86_64-linux-gnu-ubuntu-24.04.tar.xz \
+            | tar -xJ --strip-components=1
+          echo "$HOME/clang20/bin" >> "$GITHUB_PATH"
+          "$HOME/clang20/bin/clang" --version
+
+      - name: Build kernel
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          CLANG_TRIPLE: aarch64-linux-gnu-
+          CLANG_BIN: clang
+          KBUILD_BUILD_USER: github-actions
+          KBUILD_BUILD_HOST: github-actions
+        run: |
+          set -e
+          export PATH="$HOME/clang20/bin:$PATH"
+          clang --version
+          bash build/build.sh
+
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ env.DEVICE }}
+          path: |
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/dts/vendor/qcom/*.dtb
+            out/arch/arm64/boot/dts/vendor/qcom/dtbo.img
+          if-no-files-found: error
