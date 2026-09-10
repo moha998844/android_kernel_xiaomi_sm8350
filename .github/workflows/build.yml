@@ -1,0 +1,140 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: 'Create a GitHub release with the zip'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  KERNEL_NAME: Bankai
+  DEVICE: vili
+  DEFCONFIG: /vili_defconfig
+  ANYKERNEL_DIR: AnyKernel3
+
+jobs:
+  build:
+    name: Build Kernel for Vili
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 4096
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates cpio curl flex \
+            git gnupg kmod libelf-dev libssl-dev lld llvm zip unzip \
+            python3 python-is-python3 wget rsync
+      - name: Download Clang toolchain
+        run: |
+          mkdir -p "$HOME/toolchains/clang"
+          # WeebX Clang 19.1.5 — stable, works with Qualcomm 5.4 kernels
+          CLANG_URL="https://github.com/XSans0/WeebX-Clang/releases/download/WeebX-Clang-19.1.5-release/WeebX-Clang-19.1.5.tar.gz"
+          wget -q --show-progress "${CLANG_URL}" -O /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C "$HOME/toolchains/clang"
+          echo "$HOME/toolchains/clang/bin" >> "$GITHUB_PATH"
+          # Verify clang works
+          "$HOME/toolchains/clang/bin/clang" --version
+      - name: Download GCC cross-compilers
+        run: |
+          # AOSP GCC 4.9 for aarch64 and arm32 (needed for CROSS_COMPILE / vDSO)
+          GCC64_URL="https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz"
+          GCC32_URL="https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz"
+          mkdir -p "$HOME/toolchains/gcc64" "$HOME/toolchains/gcc32"
+          wget -q "$GCC64_URL" -O /tmp/gcc64.tar.gz
+          wget -q "$GCC32_URL" -O /tmp/gcc32.tar.gz
+          tar -xzf /tmp/gcc64.tar.gz -C "$HOME/toolchains/gcc64"
+          tar -xzf /tmp/gcc32.tar.gz -C "$HOME/toolchains/gcc32"
+          echo "$HOME/toolchains/gcc64/bin" >> "$GITHUB_PATH"
+          echo "$HOME/toolchains/gcc32/bin" >> "$GITHUB_PATH"
+      - name: Build kernel
+        run: |
+          chmod +x build/build.sh
+          bash build/build.sh
+        env:
+          TARGET_PRODUCT: vili
+
+      - name: Create AnyKernel3 flashable zip
+        id: zipstep
+        run: |
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M)
+          ZIP_NAME="${KERNEL_NAME}-${DEVICE}-${TIMESTAMP}.zip"
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+          # Prepare AnyKernel3 staging directory
+          STAGING="$(pwd)/ak3-staging"
+          cp -r "${ANYKERNEL_DIR}" "${STAGING}"
+          rm -rf "${STAGING}/.git" "${STAGING}/.github"
+          # Overlay custom anykernel.sh from build/
+          cp build/anykernel.sh "${STAGING}/anykernel.sh"
+          # Copy kernel Image (prefer uncompressed for AnyKernel3)
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image "${STAGING}/"
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz "${STAGING}/"
+          elif [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp out/arch/arm64/boot/Image.gz-dtb "${STAGING}/"
+          else
+            echo "::error::No kernel image found in out/arch/arm64/boot/"
+            ls -R out/arch/arm64/boot/ 2>/dev/null || true
+            exit 1
+          fi
+          # Copy DTBs if present
+          if ls out/arch/arm64/boot/dts/vendor/qcom/*.dtb 1>/dev/null 2>&1; then
+            mkdir -p "${STAGING}/dtb"
+            cp out/arch/arm64/boot/dts/vendor/qcom/*.dtb "${STAGING}/dtb/"
+          fi
+          # Copy DTBO image if present
+          if [ -f out/arch/arm64/boot/dts/vendor/qcom/dtbo.img ]; then
+            cp out/arch/arm64/boot/dts/vendor/qcom/dtbo.img "${STAGING}/"
+          fi
+          # Create flashable zip
+          cd "${STAGING}"
+          zip -r9 "${GITHUB_WORKSPACE}/${ZIP_NAME}" . -x '*.git*' 'README.md' 'LICENSE'
+          cd "${GITHUB_WORKSPACE}"
+          echo "========================================="
+          echo "  AnyKernel3 zip: ${ZIP_NAME}"
+          ls -lh "${ZIP_NAME}"
+          echo "========================================="
+      - name: Upload AnyKernel3 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.make_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || format('build-{0}', github.run_number) }}
+          name: "${{ env.KERNEL_NAME }} — ${{ env.DEVICE }} — ${{ github.ref_name }}"
+          body: |
+            **Kernel:** ${{ env.KERNEL_NAME }}
+            **Device:** Xiaomi 11T Pro (${{ env.DEVICE }})
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.sha }}
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
