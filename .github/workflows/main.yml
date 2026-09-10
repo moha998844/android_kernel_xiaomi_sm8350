@@ -51,7 +51,7 @@ jobs:
           set -e
           export PATH="$HOME/clang20/bin:$PATH"
           clang --version
-          bash build/build.sh
+          bash build.sh
 
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
