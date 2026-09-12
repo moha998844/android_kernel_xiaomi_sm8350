@@ -1,0 +1,101 @@
+name: cloud code
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
+            build-essential python3 curl git zip wget device-tree-compiler
+
+      - name: Fetch Clang r547379
+        run: |
+          mkdir -p "$HOME/clang-r547379"
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/clang-r547379.tar.gz -O clang.tar.gz
+          tar -xf clang.tar.gz -C "$HOME/clang-r547379"
+
+      - name: Fetch mkdtboimg.py
+        run: |
+          wget -q https://android.googlesource.com/platform/system/libufdt/+/refs/heads/master/utils/src/mkdtboimg.py?format=TEXT -O mkdtboimg.py.b64
+          base64 -d mkdtboimg.py.b64 > mkdtboimg.py
+          chmod +x mkdtboimg.py
+
+      - name: Configure kernel
+        run: |
+          export PATH="$HOME/clang-r547379/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER=github
+          export KBUILD_BUILD_HOST=actions
+          export TARGET_PRODUCT=vili
+          export KCFLAGS="-Wno-incompatible-function-pointer-types"
+
+          make -C "$GITHUB_WORKSPACE" O=out \
+            ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            vili_defconfig
+
+      - name: Build kernel image + dtbs
+        run: |
+          export PATH="$HOME/clang-r547379/bin:$PATH"
+          export TARGET_PRODUCT=vili
+          export KCFLAGS="-Wno-incompatible-function-pointer-types"
+
+          make -C "$GITHUB_WORKSPACE" O=out -j$(nproc --all) \
+            ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+
+      - name: Build modules
+        run: |
+          export PATH="$HOME/clang-r547379/bin:$PATH"
+          export TARGET_PRODUCT=vili
+          export KCFLAGS="-Wno-incompatible-function-pointer-types"
+
+          make -C "$GITHUB_WORKSPACE" O=out -j$(nproc --all) \
+            ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            modules
+
+      - name: Install modules
+        run: |
+          rm -rf out/modules_install
+          make -C "$GITHUB_WORKSPACE" O=out \
+            ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            modules_install INSTALL_MOD_PATH=modules_install
+
+      - name: Strip modules
+        run: |
+          export PATH="$HOME/clang-r547379/bin:$PATH"
+          find out/modules_install -name "*.ko" -exec llvm-strip --strip-unneeded -g {} \;
+
+      - name: Package dtbo.img
+        run: |
+          python3 mkdtboimg.py create out/dtbo.img --page_size=4096 \
+            out/arch/arm64/boot/dts/vendor/qcom/vili-sm8350-overlay.dtbo
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts/modules
+          cp out/arch/arm64/boot/Image artifacts/
+          cp out/arch/arm64/boot/dts/vendor/qcom/lahaina-v2.1.dtb artifacts/dtb
+          cp out/dtbo.img artifacts/
+          find out/modules_install -name "*.ko" -exec cp {} artifacts/modules/ \;
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-vili-${{ github.run_number }}
+          path: artifacts/**
