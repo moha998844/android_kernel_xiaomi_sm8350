@@ -18,10 +18,10 @@ jobs:
 
       - name: Fetch Clang r547379
         run: |
-    mkdir -p $HOME/clang-r547379
-    curl -sL https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz \
-      | tar -xz -C $HOME/clang-r547379
-    echo "$HOME/clang-r547379/bin" >> 
+          mkdir -p $HOME/clang-r547379
+           curl -sL https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz \
+             | tar -xz -C $HOME/clang-r547379
+             echo "$HOME/clang-r547379/bin" >> 
 
       - name: Fetch mkdtboimg.py
         run: |
